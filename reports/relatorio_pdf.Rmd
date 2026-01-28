@@ -1,0 +1,446 @@
+  ---
+  output: 
+    pdf_document:
+      keep_tex: true
+  header-includes:
+    - \usepackage{geometry}
+    - \usepackage{pdflscape}
+    - \usepackage{booktabs}
+    - \usepackage{ragged2e}
+    - \usepackage{graphicx}
+    - \usepackage{float}
+    - \usepackage{afterpage}
+    - \usepackage{pdfpages}
+    - \usepackage{indentfirst}
+    - \floatplacement{figure}{H}
+    - \newcommand{\switchtolandscape}{\begin{landscape}}
+    - \newcommand{\switchtoportrait}{\end{landscape}}
+    - \renewcommand{\tablename}{Tabela}
+    - \usepackage{fancyhdr}
+    - \fancyfoot[C]{\thepage}
+    - \pagenumbering{gobble}
+    
+  #recebendo dados de data, campus e curso do arquivo dashboard.Rmd
+  params:
+    data: NULL
+    campus: NULL
+    curso: NULL
+    plot: NULL
+  ---
+
+  ```{r setup, include=FALSE, message=FALSE, warning=FALSE}
+  knitr::opts_chunk$set(echo = FALSE)
+
+  campus <- params$campus
+  curso <- params$curso
+  ```
+
+  \newpage
+  \begin{center} \includegraphics[width=1\textwidth]{"src/capa_avalia.png"} \end{center}
+
+
+  \newpage \pagenumbering{arabic} \setcounter{page}{1}
+  \begin{center}
+  \fontsize{15pt}{20pt}\selectfont \textbf{APRESENTAÇÃO DO RELATÓRIO AVALIA 2024.2}
+  \end{center}
+
+  \begin{justify}
+  \fontsize{12pt}{15pt}\selectfont
+  O Programa de Autoavaliação dos Cursos de Graduação da UFPA (AVALIA-Graduação) é de responsabilidade da Pró-Reitoria de Ensino de Graduação (PROEG) em parceria com a Pró-Reitoria de Planejamento e Desenvolvimento Institucional (PROPLAN) e com o Centro de Registro e Indicadores Acadêmicos (CIAC), seguindo as diretrizes do Sistema Nacional de Avaliação da Educação Superior (SINAES) e do Plano de Desenvolvimento Institucional (PDI) 2016-2025.
+
+  O Programa AVALIA-Graduação revela o olhar interno dos sujeitos acadêmicos que cons-troem diariamente o ensino de Graduação na UFPA, sendo uma oportunidade de contribuir para as transformações qualitativas nas condições de ensino e aprendizagem, em cada período letivo, visando a garantia da qualidade da educação superior.
+
+  No presente relatório, a PROEG divulga os Resultados do AVALIA-Graduação- Período 2023.4- apresentando a análise de três (03) dimensões inter-relacionadas (perfil do corpo docente, instalações físicas e organização didático-pedagógica) e fornecendo subsídios ao aprimoramento da gestão acadêmica, efetivamente a partir do enfrentamento das fragilidades e fortalecimento das potencialidades dos cursos, em busca de construir a qualidade do ensino da graduação.
+
+  Para avaliar as respostas dos discentes em relação a sua autoavaliação, ação docente e infraestrutura, utilizou-se o gráfico de barras para avaliar o percentual de respostas, assim como o gráfico de box-plot das médias das avaliações por disciplina/docente para cada item do questionário, que variam de 1 a 4. O box-plot indica o comportamento da distribuição das avaliações feitas pelos discentes e visa trazer uma medida de tendência central, assim como identificar avaliações atípicas (Outliers) dentro do conjunto de dados, em comparação com as demais respostas obtidas.
+
+  \begin{center} \includegraphics[width=0.8\textwidth]{"src/boxplot.jpeg"} \end{center}
+
+  \end{justify}
+
+
+  \begin{justify}
+  \fontsize{13pt}{15pt}\selectfont
+
+
+  Convidamos todas e todos ao comprometimento coletivo e contínuo com o processo avaliativo e a melhoria dos Cursos de Graduação da UFPA.
+  \end{justify}
+
+  \newpage
+
+
+  \newpage
+  \vspace*{\fill}
+  \begin{center}
+  \fontsize{21pt}{20pt}\selectfont \textbf{\MakeUppercase{
+  RELATÓRIO AVALIA 2024.2\\
+  `r params$curso` - `r params$campus`
+  }}
+  \end{center}
+  \vspace*{\fill}
+
+  \newpage
+
+  ```{r, echo = FALSE,  prompt=TRUE, comment="", results='asis', message=FALSE, warning=FALSE}
+  #gerando tabela descritiva com nº docentes, nº discente e n° de turmas
+
+  #\begin{center} \includegraphics[width=0.8\textwidth]{"C:/Users/DIAVI/Documents/dashboard/boxplot_avalia.png"} \end{center}
+  #\includepdf[pages=-]{"C:/Users/DIAVI/Documents/dashboard/questionario_discente1.pdf"}
+
+
+  library(ggplot2)
+  library(shiny)
+  library(knitr)
+  library(kableExtra)
+
+  num_doc <- unique(data_filtered$DOCENTE)
+  num_disc <- unique(data_filtered$MATRICULA)
+  num_turmas <- unique(data_filtered$DISCIPLINA)
+
+  tabela_manual <- data.frame(
+    Variável = c("Número de Docentes", "Número de Discentes", "Número de Turmas"),
+    Quantitativo = c(length(num_doc), length(num_disc), length(num_turmas))
+  )
+
+  knitr::kable(tabela_manual, format = "latex", caption = "Informações Gerais da Avaliação")
+  ```
+
+  ```{r, echo = FALSE, fig.width = 8.7, fig.height = 5, fig.align = 'center'}
+  print(mediaGeral)
+  print(mediaGeralDoc)
+  ```
+
+  ```{r, echo = FALSE, fig.width = 8.7, fig.height = 5, fig.align = 'center'}
+  print(contagemDG)
+  print(contagemGeralDoc)
+  ```
+
+  \newpage
+  ```{r, echo = FALSE, fig.align = 'center', fig.width = 7.5, fig.height = 4.2, fig.pos='H'}
+  print(boxplotGeral) 
+  ```
+
+  ```{r, echo = FALSE,  prompt=TRUE, comment="", results='asis', message=FALSE, warning=FALSE}
+
+  #gerando tabela descritiva com valores min, mediana, média, 3°q. e max
+
+  autoAvDisc <- data_filtered %>% select(mediap111:mediap117)
+  acaoDoc <- data_filtered %>% select(mediap211:mediap234)
+  instFisica <- data_filtered %>% select(mediap311:mediap314)
+
+  longDisc <- autoAvDisc %>%
+    pivot_longer(cols = starts_with("mediap"), names_to = "autoav", values_to = "medias")
+
+  longDoc <- acaoDoc %>%
+    pivot_longer(cols = starts_with("mediap"), names_to = "autoav", values_to = "medias")
+
+  longInfra <- instFisica %>%
+    pivot_longer(cols = starts_with("mediap"), names_to = "autoav", values_to = "medias")
+
+  statsDisc <- summary(longDisc$medias)
+  statsDoc <- summary(longDoc$medias)
+  statsInfra <- summary(longInfra$medias)
+
+  infoDisc <- as.numeric(statsDisc[c("Min.","1st Qu.", "Median", "Mean", "3rd Qu.", "Max.")])
+  infoDoc <- as.numeric(statsDoc[c("Min.","1st Qu.", "Median", "Mean", "3rd Qu.", "Max.")])
+  infoInfra <- as.numeric(statsInfra[c("Min.","1st Qu.", "Median", "Mean", "3rd Qu.", "Max.")])
+
+  tabela2 <- data.frame(
+    Estatística = c("Min", "1º Q.", "Mediana", "Média", "3º Q.", "Max"),
+    `Autoavaliação Discente` = round(infoDisc,2), 
+    `Ação Docente` = round(infoDoc,2), 
+    `Instalações Físicas` = round(infoInfra,2),
+    check.names=FALSE)
+
+  knitr::kable(tabela2, format = "latex", caption = "Estatísticas Descritivas das Médias das Avaliações das Turmas/Docentes por Dimensão") %>%
+    kable_styling(latex_options = "hold_position",
+                  font_size = 12)
+  ```
+
+  \newpage
+  ```{r, echo = FALSE, fig.width = 8.7, fig.height = 5, fig.align = 'center'}
+  print(mediasDoc)
+  print(mediasAutoavDoc)
+  ```
+
+  ```{r, echo = FALSE, fig.width = 8.7, fig.height = 5, fig.align = 'center'}
+  print(contagemDoc)
+  print(contagem21Doc)
+  ```
+
+  ```{r, echo = FALSE, fig.align = 'center', fig.width = 7.5}
+  print(boxplotDoc)
+  ```
+
+  ```{r, echo = FALSE,  prompt=TRUE, comment="", results='asis', message=FALSE, warning=FALSE}
+
+  atProfi <- data_filtered %>% select(mediap211:mediap214)
+  gestaoDidat <- data_filtered %>% select(mediap221:mediap228)
+  instFisica <- data_filtered %>% select(mediap231:mediap234)
+
+  longAtProfi <- atProfi %>%
+    pivot_longer(cols = starts_with("mediap"), names_to = "autoav", values_to = "medias")
+
+  longGestao <- gestaoDidat %>%
+    pivot_longer(cols = starts_with("mediap"), names_to = "autoav", values_to = "medias")
+
+  longProcesso <- instFisica %>%
+    pivot_longer(cols = starts_with("mediap"), names_to = "autoav", values_to = "medias")
+
+  statsDisc <- summary(longAtProfi$medias)
+  statsDoc <- summary(longGestao$medias)
+  statsInfra <- summary(longProcesso$medias)
+
+  infoAtitude <- as.numeric(statsDisc[c("Min.","1st Qu.", "Median", "Mean", "3rd Qu.", "Max.")])
+  infoGestao <- as.numeric(statsDoc[c("Min.","1st Qu.", "Median", "Mean", "3rd Qu.", "Max.")])
+  infoProcesso <- as.numeric(statsInfra[c("Min.","1st Qu.", "Median", "Mean", "3rd Qu.", "Max.")])
+
+  tabela3 <- data.frame(
+    Estatística = c("Min", "1º Q.", "Mediana", "Média", "3º Q.", "Max"),
+    `Atitude Profissional` = round(infoAtitude,2), 
+    `Gestão Didática` = round(infoGestao,2), 
+    `Processo Avaliativo` = round(infoProcesso,2),
+    check.names=FALSE)
+
+  knitr::kable(tabela3, format = "latex", caption = "Estatísticas descritivas das Médias das Avaliações das Turmas/Docentes por Subdimensão da Ação Docente") %>%
+    kable_styling(latex_options = "hold_position",
+                  font_size = 12)
+  ```
+
+
+
+  ```{r, echo = FALSE, fig.width = 8.7, fig.height = 5, fig.align = 'center'}
+  print(mediasDisc)
+  print(mediasAvTurmaG)
+  ```
+
+  \newpage \switchtolandscape
+  ```{r, echo = FALSE, fig.width = 12.5, fig.height = 3.5, fig.align = 'center'}
+  print(contagemDisc)
+  ```
+
+  ```{r, echo = FALSE, fig.width = 14.3, fig.height = 4.9, fig.align = 'center'}
+  print(contagem11Doc)
+  ```
+
+  \switchtoportrait
+
+  ```{r, echo = FALSE, fig.align = 'center', fig.width = 7.5}
+  print(boxplotDisc)
+  ```
+
+  ```{r, echo = FALSE,  prompt=TRUE, comment="", results='asis', message=FALSE, warning=FALSE}
+  cols <- paste0("mediap", 111:117)
+
+  extrair_stats <- function(col) {
+    summary_stats <- summary(data_filtered[[col]])
+    as.numeric(summary_stats[c("Min.", "1st Qu.", "Median", "Mean", "3rd Qu.", "Max.")])
+  }
+
+  stats_list <- lapply(cols, extrair_stats)
+
+  tabela7 <- data.frame(
+    Estatística = c("Min", "1º Q.", "Mediana", "Média", "3º Q.", "Max"),
+    setNames(
+      as.data.frame(lapply(stats_list, function(x) round(x, 2))),
+      paste0("1.1.", 1:7)
+    ),
+    check.names = FALSE
+  )
+
+  knitr::kable(
+    tabela7,
+    format = "latex",
+    caption = "Estatísticas descritivas das Médias das Avaliações das Turmas/Docentes por Item relacionado à Autoavaliação Discente"
+  ) %>%
+    kable_styling(latex_options = "hold_position", font_size = 12)
+
+  ```
+
+
+  ```{r, echo = FALSE, fig.width = 8.7, fig.height = 5, fig.align = 'center'}
+  print(mediasAtProfissionalDi)
+  print(mediasAtProfissionalDo)
+  ```
+
+  ```{r, echo = FALSE, fig.width = 8.7, fig.height = 5, fig.align = 'center'}
+  print(contagemAtProfissionalDi)
+  print(contagemAtProfissionalDoc)
+  ```
+
+  ```{r, echo = FALSE, fig.align = 'center', fig.width = 7.5}
+  print(boxplotAtitude)
+  ```
+
+  ```{r, echo = FALSE,  prompt=TRUE, comment="", results='asis', message=FALSE, warning=FALSE}
+  cols <- paste0("mediap", 211:214)
+
+  # Função que calcula as estatísticas de uma coluna
+  calc_stats <- function(col) {
+    s <- summary(data_filtered[[col]])
+    as.numeric(s[c("Min.", "1st Qu.", "Median", "Mean", "3rd Qu.", "Max.")])
+  }
+
+  # Aplica a função em todas as colunas
+  stats_list <- lapply(cols, calc_stats)
+
+  # Monta a tabela
+  tabela5 <- data.frame(
+    Estatística = c("Min", "1º Q.", "Mediana", "Média", "3º Q.", "Max"),
+    setNames(lapply(stats_list, function(x) round(x, 2)), paste0("2.1.", 1:4)),
+    check.names = FALSE
+  )
+
+  # Renderiza em LaTeX
+  knitr::kable(
+    tabela5,
+    format = "latex",
+    caption = "Estatísticas descritivas das Médias das Avaliações das Turmas/Docentes por Item relacionado à Atitude Profissional"
+  ) %>%
+    kable_styling(latex_options = "hold_position", font_size = 12)
+  ```
+
+
+  ```{r, echo = FALSE, fig.width = 8.7, fig.height = 5, fig.align = 'center'}
+  print(mediasGestaoDi)
+  print(mediasGestaoDoc)
+  ```
+
+  \newpage \switchtolandscape
+  ```{r, echo = FALSE, fig.width = 11.85, fig.height = 3.5, fig.align = 'center'}
+  print(contagemGestaoDisc)
+  ```
+
+  ```{r, echo = FALSE, fig.width = 14.3, fig.height = 4.9, fig.align = 'center'}
+  print(contagemGestaoDoc)
+  ```
+  \switchtoportrait
+
+  ```{r, echo = FALSE, fig.align = 'center', fig.width = 7.5}
+  print(boxplotGestao)
+  ```
+
+  ```{r, echo = FALSE,  prompt=TRUE, comment="", results='asis', message=FALSE, warning=FALSE}
+  cols <- paste0("mediap", 221:228)
+
+  # Função que calcula as estatísticas de uma coluna
+  calc_stats <- function(col) {
+    s <- summary(data_filtered[[col]])
+    as.numeric(s[c("Min.", "1st Qu.", "Median", "Mean", "3rd Qu.", "Max.")])
+  }
+
+  # Aplica a função em todas as colunas
+  stats_list <- lapply(cols, calc_stats)
+
+  # Monta a tabela
+  tabela5 <- data.frame(
+    Estatística = c("Min", "1º Q.", "Mediana", "Média", "3º Q.", "Max"),
+    setNames(lapply(stats_list, function(x) round(x, 2)), paste0("2.2.", 1:8)),
+    check.names = FALSE
+  )
+
+  # Renderiza em LaTeX
+  knitr::kable(
+    tabela5,
+    format = "latex",
+    caption = "Estatísticas descritivas das Médias das Avaliações das Turmas/Docentes por Item relacionado à Gestão Didática"
+  ) %>%
+    kable_styling(latex_options = "hold_position", font_size = 12)
+  ```
+
+
+  ```{r, echo = FALSE, fig.width = 8.7, fig.height = 5, fig.align = 'center'}
+  print(mediasProcessoDi)
+  print(mediasProcessoDoc)
+  ```
+
+  ```{r, echo = FALSE, fig.width = 8.7, fig.height = 5, fig.align = 'center'}
+  print(contagemProcessoDisc)
+  print(contagemProcessoDoc)
+  ```
+
+  ```{r, echo = FALSE, fig.align = 'center', fig.width = 7.5}
+  print(boxplotProcesso)
+  ```
+
+  ```{r, echo = FALSE,  prompt=TRUE, comment="", results='asis', message=FALSE, warning=FALSE}
+  cols <- paste0("mediap", 231:234)
+
+  extrair_stats <- function(col) {
+    summary_stats <- summary(data_filtered[[col]])
+    as.numeric(summary_stats[c("Min.", "1st Qu.", "Median", "Mean", "3rd Qu.", "Max.")])
+  }
+
+  stats_list <- lapply(cols, extrair_stats)
+
+  tabela6 <- data.frame(
+    Estatística = c("Min", "1º Q.", "Mediana", "Média", "3º Q.", "Max"),
+    setNames(
+      as.data.frame(lapply(stats_list, function(x) round(x, 2))),
+      paste0("2.3.", 1:4)
+    ),
+    check.names = FALSE
+  )
+
+  knitr::kable(
+    tabela6,
+    format = "latex",
+    caption = "Estatísticas descritivas das Médias das Avaliações das Turmas/Docentes por Item relacionado ao Processo Avaliativo"
+  ) %>%
+    kable_styling(latex_options = "hold_position", font_size = 12)
+  ```
+
+  ```{r, echo = FALSE, fig.width = 8.7, fig.height = 5, fig.align = 'center'}
+  print(mediasInfraDisc)
+  print(mediasInfraDoc)
+  ```
+
+  ```{r, echo = FALSE, fig.width = 8.7, fig.height = 5, fig.align = 'center'}
+  print(contagemInfraDisc)
+  print(contagemInfraDoc)
+  ```
+
+  ```{r, echo = FALSE, fig.align = 'center', warning=FALSE, message=FALSE, fig.width = 7.5}
+  print(boxplotInfra)
+  ```
+
+  ```{r, echo = FALSE,  prompt=TRUE, comment="", results='asis', message=FALSE, warning=FALSE}
+  cols <- paste0("mediap", 311:314)
+
+  # Função para extrair estatísticas
+  extrair_stats <- function(col) {
+    summary_stats <- summary(data_filtered[[col]])
+    as.numeric(summary_stats[c("Min.", "1st Qu.", "Median", "Mean", "3rd Qu.", "Max.")])
+  }
+
+  # Aplicar função a todas as colunas
+  stats_list <- lapply(cols, extrair_stats)
+
+  # Transformar em data.frame
+  tabela8 <- data.frame(
+    Estatística = c("Min", "1º Q.", "Mediana", "Média", "3º Q.", "Max"),
+    setNames(
+      as.data.frame(lapply(stats_list, function(x) round(x, 2))),
+      paste0("3.1.", 1:4)
+    ),
+    check.names = FALSE
+  )
+
+  # Gerar tabela formatada em LaTeX
+  knitr::kable(
+    tabela8,
+    format = "latex",
+    caption = "Estatísticas descritivas das Médias das Avaliações das Turmas/Docentes por Item relacionado às Instalações Físicas"
+  ) %>%
+    kable_styling(latex_options = "hold_position", font_size = 12)
+  ```
+
+  \newpage \switchtolandscape
+  ```{r, echo = FALSE, fig.width = 11.85, fig.height = 3.5, fig.align = 'center'}
+  print(atividadeDisc)
+  print(atividadeDoc)
+  ```
+  \switchtoportrait
+
+  \includepdf[pages=-]{"src/questionario_disc.pdf"}
+  \includepdf[pages=-]{"src/questionario_doc.pdf"}
