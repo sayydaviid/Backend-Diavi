@@ -147,24 +147,50 @@ normalize_param <- function(x) {
 # COERÇÃO CONTROLADA DE COLUNAS NUMÉRICAS IMPORTANTES
 # (porque o XLSX foi lido como texto para evitar warnings do readxl)
 # -------------------------------------------------------------------
+.fast_num <- function(v) {
+  if (is.numeric(v)) return(v)
+  if (is.factor(v)) v <- as.character(v)
+  v <- trimws(as.character(v))
+  v <- gsub(",", ".", v, fixed = TRUE)
+  suppressWarnings(as.numeric(v))
+}
+
 .coerce_numeric_cols <- function(df, cols) {
   cols <- intersect(as.character(cols), names(df))
-  if (!length(cols)) return(df)
+  if (!length(cols) || !nrow(df)) return(df)
 
   for (cl in cols) {
-    v <- df[[cl]]
-    if (is.factor(v)) v <- as.character(v)
-    v <- trimws(as.character(v))
-    v <- gsub(",", ".", v, fixed = TRUE)
-    df[[cl]] <- suppressWarnings(as.numeric(v))
+    df[[cl]] <- .fast_num(df[[cl]])
   }
   df
 }
 
-# --- 2. Carga Inicial dos Dados --------------------------------------
-all_data <- load_data()
-base_discente_global <- all_data$discente
-base_docente_global  <- all_data$docente
+.mean_cols <- function(df, cols) {
+  cols <- intersect(as.character(cols), names(df))
+  if (!nrow(df) || !length(cols)) return(NA_real_)
+  m <- df[, cols, drop = FALSE]
+  m[] <- lapply(m, .fast_num)
+  s <- sum(m, na.rm = TRUE)
+  n <- sum(!is.na(m))
+  if (!n) return(NA_real_)
+  s / n
+}
+
+# ==============================================================================
+# CARGA SOB DEMANDA (LAZY LOAD) + CACHES
+# - Evita OOM no boot: load_data() só roda quando o 1º endpoint precisar
+# ==============================================================================
+.CACHE <- new.env(parent = emptyenv())
+.CACHE$loaded <- FALSE
+.CACHE$loading <- FALSE
+.CACHE$base_discente_global <- NULL
+.CACHE$base_docente_global  <- NULL
+.CACHE$filters_cache <- NULL
+
+.CACHE$rankings_ready <- FALSE
+.CACHE$rankings_cache <- NULL
+.CACHE$melhor_campus_global <- NULL
+.CACHE$pior_campus_global <- NULL
 
 # Converte colunas de respostas (1..4), médias (mediap*) e atividades (0/1) para numérico
 disc_numeric_cols <- unique(c(
@@ -179,11 +205,137 @@ doc_numeric_cols <- unique(c(
   colsAtividadesDoc
 ))
 
-base_discente_global <- .coerce_numeric_cols(base_discente_global, disc_numeric_cols)
-base_docente_global  <- .coerce_numeric_cols(base_docente_global,  doc_numeric_cols)
+.ensure_loaded <- function() {
+  if (isTRUE(.CACHE$loaded)) return(invisible(TRUE))
 
-cat(">> Dados carregados. API pronta para iniciar.\n")
+  # lock simples para evitar corrida em requests concorrentes
+  if (isTRUE(.CACHE$loading)) {
+    while (isTRUE(.CACHE$loading)) Sys.sleep(0.05)
+    return(invisible(.CACHE$loaded))
+  }
 
+  .CACHE$loading <- TRUE
+  on.exit({ .CACHE$loading <- FALSE }, add = TRUE)
+
+  # 1) carrega
+  all_data <- load_data()
+  base_discente_global <- all_data$discente
+  base_docente_global  <- all_data$docente
+  rm(all_data)
+  invisible(gc())
+
+  # 2) coerções (reduz warnings e evita recalcular por request)
+  base_discente_global <- .coerce_numeric_cols(base_discente_global, disc_numeric_cols)
+  base_docente_global  <- .coerce_numeric_cols(base_docente_global,  doc_numeric_cols)
+
+  # 3) cache básico de filtros (barato, mas evita recalcular sempre)
+  #    IMPORTANTE: protege caso CAMPUS/CURSO não existam
+  campus_disc <- if ("CAMPUS" %in% names(base_discente_global)) base_discente_global$CAMPUS else character()
+  campus_doc  <- if ("CAMPUS" %in% names(base_docente_global))  base_docente_global$CAMPUS  else character()
+  curso_disc  <- if ("CURSO"  %in% names(base_discente_global)) base_discente_global$CURSO  else character()
+  curso_doc   <- if ("CURSO"  %in% names(base_docente_global))  base_docente_global$CURSO   else character()
+
+  .CACHE$filters_cache <- list(
+    campus = sort(unique(c(campus_disc, campus_doc))),
+    cursos = sort(unique(c(curso_disc, curso_doc)))
+  )
+
+  .CACHE$base_discente_global <- base_discente_global
+  .CACHE$base_docente_global  <- base_docente_global
+  .CACHE$loaded <- TRUE
+
+  cat(">> Dados carregados (sob demanda). API pronta.\n")
+  invisible(gc())
+  invisible(TRUE)
+}
+
+.get_bases <- function() {
+  .ensure_loaded()
+  list(
+    disc = .CACHE$base_discente_global,
+    doc  = .CACHE$base_docente_global
+  )
+}
+
+.get_filtered <- function(campus = "all", curso = "all") {
+  .ensure_loaded()
+  campus_norm <- normalize_param(campus)
+  curso_norm  <- normalize_param(curso)
+
+  filter_data(
+    .CACHE$base_discente_global,
+    .CACHE$base_docente_global,
+    campus_norm,
+    curso_norm
+  )
+}
+
+# ==============================================================================
+# RANKING CACHE (sob demanda e SEM pivot_longer para não explodir memória)
+# ==============================================================================
+.rank_por_campus <- function(df, campus_col = "CAMPUS", cols) {
+  cols <- intersect(as.character(cols), names(df))
+  if (!nrow(df) || !length(cols) || !(campus_col %in% names(df))) {
+    return(data.frame(CAMPUS = character(), media_geral = numeric()))
+  }
+
+  campus <- df[[campus_col]]
+  ok_campus <- !is.na(campus) & campus != ""
+  if (!any(ok_campus)) {
+    return(data.frame(CAMPUS = character(), media_geral = numeric()))
+  }
+
+  m <- df[ok_campus, cols, drop = FALSE]
+  m[] <- lapply(m, .fast_num)
+
+  row_sum   <- rowSums(m, na.rm = TRUE)
+  row_count <- rowSums(!is.na(m))
+
+  campus2 <- campus[ok_campus]
+
+  sum_by   <- tapply(row_sum,   campus2, sum, na.rm = TRUE)
+  count_by <- tapply(row_count, campus2, sum, na.rm = TRUE)
+
+  media <- as.numeric(sum_by / pmax(1, count_by))
+
+  data.frame(
+    CAMPUS = names(media),
+    media_geral = media,
+    row.names = NULL,
+    stringsAsFactors = FALSE
+  )
+}
+
+.ensure_rankings <- function() {
+  .ensure_loaded()
+  if (isTRUE(.CACHE$rankings_ready)) return(invisible(TRUE))
+
+  todas_colunas_questoes <- intersect(
+    c(colsAutoAvDisc, colsAcaoDocente, colsInfra),
+    names(.CACHE$base_discente_global)
+  )
+
+  rankings_cache <- .rank_por_campus(.CACHE$base_discente_global, "CAMPUS", todas_colunas_questoes)
+
+  melhor_campus_global <- if (nrow(rankings_cache)) {
+    rankings_cache[which.max(rankings_cache$media_geral), , drop = FALSE]
+  } else {
+    data.frame(CAMPUS = NA_character_, media_geral = NA_real_)
+  }
+
+  pior_campus_global <- if (nrow(rankings_cache)) {
+    rankings_cache[which.min(rankings_cache$media_geral), , drop = FALSE]
+  } else {
+    data.frame(CAMPUS = NA_character_, media_geral = NA_real_)
+  }
+
+  .CACHE$rankings_cache <- rankings_cache
+  .CACHE$melhor_campus_global <- melhor_campus_global
+  .CACHE$pior_campus_global <- pior_campus_global
+  .CACHE$rankings_ready <- TRUE
+  invisible(gc())
+  invisible(TRUE)
+}
 
 # --- 3. Definição da API ---------------------------------------------
 pr <- pr()
@@ -201,32 +353,9 @@ pr <- pr_filter(pr, "cors", function(req, res) {
 pr <- pr_get(pr, "/", function() list(api_status = "Online", message = "Bem-vindo à API do Dashboard AVALIA."))
 pr <- pr_get(pr, "/health", function() list(status = "OK", time = as.character(Sys.time())))
 pr <- pr_get(pr, "/filters", function() {
-  list(
-    campus = sort(unique(c(base_discente_global$CAMPUS, base_docente_global$CAMPUS))),
-    cursos = sort(unique(c(base_discente_global$CURSO,  base_docente_global$CURSO)))
-  )
+  .ensure_loaded()
+  .CACHE$filters_cache
 })
-
-# ==============================================================================
-# PRÉ-CÁLCULO DE RANKINGS (Executa apenas uma vez na inicialização)
-# ==============================================================================
-todas_colunas_questoes <- c(colsAutoAvDisc, colsAcaoDocente, colsInfra)
-
-rankings_cache <- base_discente_global %>%
-  dplyr::select(CAMPUS, dplyr::all_of(todas_colunas_questoes)) %>%
-  tidyr::pivot_longer(cols = -CAMPUS, names_to = "questao", values_to = "nota") %>%
-  dplyr::filter(!is.na(nota) & !is.na(CAMPUS)) %>%
-  dplyr::mutate(nota = suppressWarnings(as.numeric(nota))) %>%
-  dplyr::group_by(CAMPUS) %>%
-  dplyr::summarise(media_geral = mean(nota, na.rm = TRUE), .groups = "drop")
-
-melhor_campus_global <- rankings_cache %>%
-  dplyr::filter(media_geral == max(media_geral, na.rm = TRUE)) %>%
-  dplyr::slice(1)
-
-pior_campus_global <- rankings_cache %>%
-  dplyr::filter(media_geral == min(media_geral, na.rm = TRUE)) %>%
-  dplyr::slice(1)
 
 # ==========================================================
 # >>>>>>>>>>>> CARDS (DISCENTE) <<<<<<<<<<<<
@@ -235,15 +364,7 @@ pr <- pr_get(
   pr, "/discente/geral/summary",
   function(campus = "all", curso = "all") {
 
-    campus_norm <- normalize_param(campus)
-    curso_norm  <- normalize_param(curso)
-
-    dados_filtrados <- filter_data(
-      base_discente_global,
-      base_docente_global,
-      campus_norm,
-      curso_norm
-    )
+    dados_filtrados <- .get_filtered(campus, curso)
 
     disc <- dados_filtrados$disc
     doc  <- dados_filtrados$doc
@@ -282,15 +403,14 @@ pr <- pr_get(
   pr, "/discente/dimensoes/medias",
   function(campus = "all", curso = "all") {
 
-    campus <- normalize_param(campus); curso <- normalize_param(curso)
-    dados <- filter_data(base_discente_global, base_docente_global, campus, curso)$disc
+    dados <- .get_filtered(campus, curso)$disc
 
     data.frame(
       dimensao = c("Autoavaliação Discente", "Ação Docente", "Instalações Físicas"),
       media = c(
-        mean(unlist(dados[, colsAutoAvDisc]), na.rm = TRUE),
-        mean(unlist(dados[, colsAcaoDocente]), na.rm = TRUE),
-        mean(unlist(dados[, colsInfra]),       na.rm = TRUE)
+        .mean_cols(dados, colsAutoAvDisc),
+        .mean_cols(dados, colsAcaoDocente),
+        .mean_cols(dados, colsInfra)
       )
     )
   }
@@ -300,12 +420,11 @@ pr <- pr_get(
   pr, "/discente/dimensoes/proporcoes",
   function(campus = "all", curso = "all") {
 
-    campus <- normalize_param(campus); curso <- normalize_param(curso)
-    dados <- filter_data(base_discente_global, base_docente_global, campus, curso)$disc
+    dados <- .get_filtered(campus, curso)$disc
 
-    cont_disc  <- lapply(dados[, colsAutoAvDisc], table)
-    cont_doc   <- lapply(dados[, colsAcaoDocente], table)
-    cont_infra <- lapply(dados[, colsInfra],       table)
+    cont_disc  <- lapply(dados[, colsAutoAvDisc, drop = FALSE], table)
+    cont_doc   <- lapply(dados[, colsAcaoDocente, drop = FALSE], table)
+    cont_infra <- lapply(dados[, colsInfra,       drop = FALSE], table)
 
     data.frame(
       dimensao = rep(c("Autoavaliação Discente","Ação Docente","Instalações Físicas"), each = length(alternativas)),
@@ -330,15 +449,16 @@ pr <- pr_get(
 
     campus <- normalize_param(campus)
     curso  <- normalize_param(curso)
-    dados  <- filter_data(base_discente_global, base_docente_global, campus, curso)$disc
+    dados  <- .get_filtered(campus, curso)$disc
 
     auto_num  <- dados[, intersect(names(dados), paste0("mediap", 111:117)), drop = FALSE]
     doc_num   <- dados[, intersect(names(dados), paste0("mediap", 211:234)), drop = FALSE]
     infra_num <- dados[, intersect(names(dados), paste0("mediap", 311:314)), drop = FALSE]
 
-    v_auto  <- .to_num_mediap(unlist(auto_num,  use.names = FALSE))
-    v_doc   <- .to_num_mediap(unlist(doc_num,   use.names = FALSE))
-    v_infra <- .to_num_mediap(unlist(infra_num, use.names = FALSE))
+    # evita overhead do unlist em data.frame grande
+    v_auto  <- .to_num_mediap(as.numeric(as.matrix(auto_num)))
+    v_doc   <- .to_num_mediap(as.numeric(as.matrix(doc_num)))
+    v_infra <- .to_num_mediap(as.numeric(as.matrix(infra_num)))
 
     s6_auto  <- .calc_stats6_pdf(v_auto)
     s6_doc   <- .calc_stats6_pdf(v_doc)
@@ -392,7 +512,7 @@ pr <- pr_get(
   function(campus = "all", curso = "all") {
 
     campus <- normalize_param(campus); curso <- normalize_param(curso)
-    dados <- filter_data(base_discente_global, base_docente_global, campus, curso)$disc
+    dados <- .get_filtered(campus, curso)$disc
 
     cols_atp <- intersect(colsAtProfissional, names(dados))
     cols_ges <- intersect(colsGestaoDidatica, names(dados))
@@ -424,7 +544,7 @@ pr <- pr_get(
   function(campus = "all", curso = "all") {
 
     campus <- normalize_param(campus); curso <- normalize_param(curso)
-    dados <- filter_data(base_discente_global, base_docente_global, campus, curso)$disc
+    dados <- .get_filtered(campus, curso)$disc
     if (nrow(dados) == 0) return(data.frame(atividade = character(), percentual = numeric()))
 
     intervalo <- dados %>% select(all_of(colsAtividadesDisc)) %>% mutate(across(everything(), as.character))
@@ -448,7 +568,7 @@ pr <- pr_get(
   function(campus = "all", curso = "all") {
 
     campus <- normalize_param(campus); curso <- normalize_param(curso)
-    dados <- filter_data(base_discente_global, base_docente_global, campus, curso)$disc
+    dados <- .get_filtered(campus, curso)$disc
     itens <- dados[, colsAutoAvDisc, drop = FALSE]
 
     dados_longos <- itens %>%
@@ -471,7 +591,7 @@ pr <- pr_get(
   function(campus = "all", curso = "all") {
 
     campus <- normalize_param(campus); curso <- normalize_param(curso)
-    dados <- filter_data(base_discente_global, base_docente_global, campus, curso)$disc
+    dados <- .get_filtered(campus, curso)$disc
     itens <- dados[, colsAutoAvDisc, drop = FALSE]
     itens[] <- lapply(itens, function(v) suppressWarnings(as.numeric(v)))
     medias <- sapply(itens, function(col) mean(col, na.rm = TRUE))
@@ -489,7 +609,7 @@ pr <- pr_get(
 
     campus <- normalize_param(campus)
     curso  <- normalize_param(curso)
-    dados  <- filter_data(base_discente_global, base_docente_global, campus, curso)$disc
+    dados  <- .get_filtered(campus, curso)$disc
 
     cols <- intersect(paste0("mediap", 111:117), names(dados))
 
@@ -548,7 +668,7 @@ pr <- pr_get(
   function(campus = "all", curso = "all") {
 
     campus <- normalize_param(campus); curso <- normalize_param(curso)
-    dados <- filter_data(base_discente_global, base_docente_global, campus, curso)$disc
+    dados <- .get_filtered(campus, curso)$disc
 
     cols <- intersect(colsAtProfissional, names(dados))
     if (!length(cols)) return(data.frame(item = character(), conceito = character(), valor = numeric()))
@@ -574,7 +694,7 @@ pr <- pr_get(
   function(campus = "all", curso = "all") {
 
     campus <- normalize_param(campus); curso <- normalize_param(curso)
-    dados <- filter_data(base_discente_global, base_docente_global, campus, curso)$disc
+    dados <- .get_filtered(campus, curso)$disc
     itens <- dados[, colsAtProfissional, drop = FALSE]
     itens[] <- lapply(itens, function(v) suppressWarnings(as.numeric(v)))
     medias <- sapply(itens, function(col) mean(col, na.rm = TRUE))
@@ -593,7 +713,7 @@ pr <- pr_get(
     campus <- normalize_param(campus)
     curso  <- normalize_param(curso)
 
-    dados <- filter_data(base_discente_global, base_docente_global, campus, curso)$disc
+    dados <- .get_filtered(campus, curso)$disc
     cols  <- intersect(paste0("mediap", 211:214), names(dados))
 
     box_df_list <- list()
@@ -635,7 +755,6 @@ pr <- pr_get(
     )
   }
 )
-
 # ==========================================================
 # ---------------------------- DOCENTES (Agregados)
 # ==========================================================
@@ -644,14 +763,14 @@ pr <- pr_get(
   function(campus = "all", curso = "all") {
 
     campus <- normalize_param(campus); curso <- normalize_param(curso)
-    dados <- filter_data(base_discente_global, base_docente_global, campus, curso)$doc
+    dados <- .get_filtered(campus, curso)$doc
 
     data.frame(
       dimensao = c("Avaliação da Turma","Autoavaliação da Ação Docente","Instalações Físicas"),
       media = c(
-        mean(unlist(dados[, colsAvTurmaDoc]),     na.rm = TRUE),
-        mean(unlist(dados[, colsAcaoDocenteDoc]), na.rm = TRUE),
-        mean(unlist(dados[, colsInfraDoc]),       na.rm = TRUE)
+        .mean_cols(dados, colsAvTurmaDoc),
+        .mean_cols(dados, colsAcaoDocenteDoc),
+        .mean_cols(dados, colsInfraDoc)
       )
     )
   }
@@ -662,11 +781,11 @@ pr <- pr_get(
   function(campus = "all", curso = "all") {
 
     campus <- normalize_param(campus); curso <- normalize_param(curso)
-    dados <- filter_data(base_discente_global, base_docente_global, campus, curso)$doc
+    dados <- .get_filtered(campus, curso)$doc
 
-    cont_turma <- lapply(dados[, colsAvTurmaDoc],     table)
-    cont_acao  <- lapply(dados[, colsAcaoDocenteDoc], table)
-    cont_infra <- lapply(dados[, colsInfraDoc],       table)
+    cont_turma <- lapply(dados[, colsAvTurmaDoc,     drop = FALSE], table)
+    cont_acao  <- lapply(dados[, colsAcaoDocenteDoc, drop = FALSE], table)
+    cont_infra <- lapply(dados[, colsInfraDoc,       drop = FALSE], table)
 
     data.frame(
       dimensao = rep(c("Avaliação da Turma","Autoavaliação da Ação Docente","Instalações Físicas"), each = length(alternativas)),
@@ -689,15 +808,15 @@ pr <- pr_get(
 
     campus <- normalize_param(campus)
     curso  <- normalize_param(curso)
-    dados  <- filter_data(base_discente_global, base_docente_global, campus, curso)$doc
+    dados  <- .get_filtered(campus, curso)$doc
 
     cols_turma <- intersect(colsAvTurmaDoc,     names(dados))
     cols_acao  <- intersect(colsAcaoDocenteDoc, names(dados))
     cols_infra <- intersect(colsInfraDoc,       names(dados))
 
-    v_turma <- if (length(cols_turma)) unlist(dados[, cols_turma, drop = FALSE], use.names = FALSE) else numeric(0)
-    v_acao  <- if (length(cols_acao))  unlist(dados[, cols_acao,  drop = FALSE], use.names = FALSE) else numeric(0)
-    v_infra <- if (length(cols_infra)) unlist(dados[, cols_infra, drop = FALSE], use.names = FALSE) else numeric(0)
+    v_turma <- if (length(cols_turma)) as.numeric(as.matrix(dados[, cols_turma, drop = FALSE])) else numeric(0)
+    v_acao  <- if (length(cols_acao))  as.numeric(as.matrix(dados[, cols_acao,  drop = FALSE])) else numeric(0)
+    v_infra <- if (length(cols_infra)) as.numeric(as.matrix(dados[, cols_infra, drop = FALSE])) else numeric(0)
 
     s_turma <- .calc_box_safe(v_turma)
     s_acao  <- .calc_box_safe(v_acao)
@@ -731,7 +850,7 @@ pr <- pr_get(
   function(campus = "all", curso = "all") {
 
     campus <- normalize_param(campus); curso <- normalize_param(curso)
-    dados <- filter_data(base_discente_global, base_docente_global, campus, curso)$doc
+    dados <- .get_filtered(campus, curso)$doc
     if (!nrow(dados)) return(data.frame(atividade = character(), percentual = numeric()))
 
     intervalo <- dados %>% select(all_of(colsAtividadesDoc)) %>% mutate(across(everything(), as.character))
@@ -757,7 +876,7 @@ pr <- pr_get(
   function(campus = "all", curso = "all") {
 
     campus <- normalize_param(campus); curso <- normalize_param(curso)
-    dados <- filter_data(base_discente_global, base_docente_global, campus, curso)$disc
+    dados <- .get_filtered(campus, curso)$disc
 
     cols_atp <- intersect(colsAtProfissional, names(dados))
     cols_ges <- intersect(colsGestaoDidatica, names(dados))
@@ -786,7 +905,7 @@ pr <- pr_get(
   function(campus = "all", curso = "all") {
 
     campus <- normalize_param(campus); curso <- normalize_param(curso)
-    dados <- filter_data(base_discente_global, base_docente_global, campus, curso)$disc
+    dados <- .get_filtered(campus, curso)$disc
 
     atp <- intersect(colsAtProfissional, names(dados))
     ges <- intersect(colsGestaoDidatica, names(dados))
@@ -796,7 +915,7 @@ pr <- pr_get(
       if (!length(cols)) return(NULL)
       b <- dados[, cols, drop = FALSE]
       b[] <- lapply(b, function(v) suppressWarnings(as.numeric(v)))
-      tibble(subdimensao = rotulo, media = mean(unlist(b), na.rm = TRUE))
+      tibble(subdimensao = rotulo, media = mean(as.numeric(as.matrix(b)), na.rm = TRUE))
     }
 
     res <- list(
@@ -818,15 +937,15 @@ pr <- pr_get(
   function(campus = "all", curso = "all") {
 
     campus <- normalize_param(campus); curso <- normalize_param(curso)
-    dados  <- filter_data(base_discente_global, base_docente_global, campus, curso)$disc
+    dados  <- .get_filtered(campus, curso)$disc
 
     cols_21 <- intersect(paste0("mediap", 211:214), names(dados))
     cols_22 <- intersect(paste0("mediap", 221:228), names(dados))
     cols_23 <- intersect(paste0("mediap", 231:234), names(dados))
 
-    v_21 <- if (length(cols_21)) .to_num_mediap(unlist(dados[, cols_21, drop = FALSE], use.names = FALSE)) else numeric(0)
-    v_22 <- if (length(cols_22)) .to_num_mediap(unlist(dados[, cols_22, drop = FALSE], use.names = FALSE)) else numeric(0)
-    v_23 <- if (length(cols_23)) .to_num_mediap(unlist(dados[, cols_23, drop = FALSE], use.names = FALSE)) else numeric(0)
+    v_21 <- if (length(cols_21)) .to_num_mediap(as.numeric(as.matrix(dados[, cols_21, drop = FALSE]))) else numeric(0)
+    v_22 <- if (length(cols_22)) .to_num_mediap(as.numeric(as.matrix(dados[, cols_22, drop = FALSE]))) else numeric(0)
+    v_23 <- if (length(cols_23)) .to_num_mediap(as.numeric(as.matrix(dados[, cols_23, drop = FALSE]))) else numeric(0)
 
     s_21 <- .calc_box_safe(v_21)
     s_22 <- .calc_box_safe(v_22)
@@ -862,7 +981,7 @@ pr <- pr_get(
   function(campus = "all", curso = "all") {
 
     campus <- normalize_param(campus); curso <- normalize_param(curso)
-    dados <- filter_data(base_discente_global, base_docente_global, campus, curso)$doc
+    dados <- .get_filtered(campus, curso)$doc
     itens <- dados[, colsAvTurmaDoc, drop = FALSE]
     itens[] <- lapply(itens, function(v) suppressWarnings(as.numeric(v)))
     medias <- sapply(itens, function(col) mean(col, na.rm = TRUE))
@@ -875,7 +994,7 @@ pr <- pr_get(
   function(campus = "all", curso = "all") {
 
     campus <- normalize_param(campus); curso <- normalize_param(curso)
-    dados <- filter_data(base_discente_global, base_docente_global, campus, curso)$doc
+    dados <- .get_filtered(campus, curso)$doc
     itens <- dados[, colsAvTurmaDoc, drop = FALSE]
 
     dados_longos <- itens %>%
@@ -900,7 +1019,7 @@ pr <- pr_get(
 
     .assert_subdim_map_doc()
     campus <- normalize_param(campus); curso <- normalize_param(curso)
-    dados <- filter_data(base_discente_global, base_docente_global, campus, curso)$doc
+    dados <- .get_filtered(campus, curso)$doc
     names(dados) <- trimws(as.character(names(dados)))
 
     res <- lapply(names(subdim_map_doc), function(sd) {
@@ -908,7 +1027,7 @@ pr <- pr_get(
       if (!length(cols)) return(NULL)
       bloco <- dados[, cols, drop = FALSE]
       bloco[] <- lapply(bloco, function(v) suppressWarnings(as.numeric(v)))
-      tibble(subdimensao = sd, media = mean(unlist(bloco), na.rm = TRUE))
+      tibble(subdimensao = sd, media = mean(as.numeric(as.matrix(bloco)), na.rm = TRUE))
     })
 
     res <- Filter(Negate(is.null), res)
@@ -923,7 +1042,7 @@ pr <- pr_get(
 
     .assert_subdim_map_doc()
     campus <- normalize_param(campus); curso <- normalize_param(curso)
-    dados <- filter_data(base_discente_global, base_docente_global, campus, curso)$doc
+    dados <- .get_filtered(campus, curso)$doc
     names(dados) <- trimws(as.character(names(dados)))
 
     out_list <- list()
@@ -967,7 +1086,7 @@ pr <- pr_get(
     .assert_subdim_map_doc()
     campus <- normalize_param(campus); curso <- normalize_param(curso)
 
-    dados <- filter_data(base_discente_global, base_docente_global, campus, curso)$doc
+    dados <- .get_filtered(campus, curso)$doc
     names(dados) <- trimws(as.character(names(dados)))
 
     cols <- intersect(subdim_map_doc[["Atitude Profissional"]], names(dados))
@@ -988,7 +1107,7 @@ pr <- pr_get(
     .assert_subdim_map_doc()
     campus <- normalize_param(campus); curso <- normalize_param(curso)
 
-    dados <- filter_data(base_discente_global, base_docente_global, campus, curso)$doc
+    dados <- .get_filtered(campus, curso)$doc
     names(dados) <- trimws(as.character(names(dados)))
 
     cols <- intersect(subdim_map_doc[["Atitude Profissional"]], names(dados))
@@ -1018,7 +1137,7 @@ pr <- pr_get(
     .assert_subdim_map_doc()
     campus <- normalize_param(campus); curso <- normalize_param(curso)
 
-    dados <- filter_data(base_discente_global, base_docente_global, campus, curso)$doc
+    dados <- .get_filtered(campus, curso)$doc
     if (!nrow(dados)) {
       return(list(
         boxplot_data  = data.frame(x = character(), y = I(list())),
@@ -1065,7 +1184,7 @@ pr <- pr_get(
   function(campus = "all", curso = "all") {
 
     campus <- normalize_param(campus); curso <- normalize_param(curso)
-    dados <- filter_data(base_discente_global, base_docente_global, campus, curso)$disc
+    dados <- .get_filtered(campus, curso)$disc
 
     cols <- intersect(colsGestaoDidatica, names(dados))
     if (!length(cols)) return(data.frame(item = character(), media = numeric()))
@@ -1083,7 +1202,7 @@ pr <- pr_get(
   function(campus = "all", curso = "all") {
 
     campus <- normalize_param(campus); curso <- normalize_param(curso)
-    dados <- filter_data(base_discente_global, base_docente_global, campus, curso)$disc
+    dados <- .get_filtered(campus, curso)$disc
 
     cols <- intersect(colsGestaoDidatica, names(dados))
     if (!length(cols)) return(data.frame(item = character(), conceito = character(), valor = numeric()))
@@ -1114,7 +1233,7 @@ pr <- pr_get(
     .assert_subdim_map_doc()
     campus <- normalize_param(campus); curso <- normalize_param(curso)
 
-    dados <- filter_data(base_discente_global, base_docente_global, campus, curso)$doc
+    dados <- .get_filtered(campus, curso)$doc
     names(dados) <- trimws(as.character(names(dados)))
 
     cols <- intersect(subdim_map_doc[["Gestão Didática"]], names(dados))
@@ -1135,7 +1254,7 @@ pr <- pr_get(
     .assert_subdim_map_doc()
     campus <- normalize_param(campus); curso <- normalize_param(curso)
 
-    dados <- filter_data(base_discente_global, base_docente_global, campus, curso)$doc
+    dados <- .get_filtered(campus, curso)$doc
     names(dados) <- trimws(as.character(names(dados)))
 
     cols <- intersect(subdim_map_doc[["Gestão Didática"]], names(dados))
@@ -1164,7 +1283,7 @@ pr <- pr_get(
     .assert_subdim_map_doc()
     campus <- normalize_param(campus); curso <- normalize_param(curso)
 
-    dados <- filter_data(base_discente_global, base_docente_global, campus, curso)$doc
+    dados <- .get_filtered(campus, curso)$doc
     if (!nrow(dados)) {
       return(list(
         boxplot_data  = data.frame(x = character(), y = I(list())),
@@ -1213,7 +1332,7 @@ pr <- pr_get(
     campus <- normalize_param(campus)
     curso  <- normalize_param(curso)
 
-    dados <- filter_data(base_discente_global, base_docente_global, campus, curso)$disc
+    dados <- .get_filtered(campus, curso)$disc
     cols  <- intersect(paste0("mediap", 221:228), names(dados))
 
     box_df_list <- list()
@@ -1263,7 +1382,7 @@ pr <- pr_get(
   function(campus = "all", curso = "all") {
 
     campus <- normalize_param(campus); curso <- normalize_param(curso)
-    dados  <- filter_data(base_discente_global, base_docente_global, campus, curso)$disc
+    dados  <- .get_filtered(campus, curso)$disc
 
     cols <- intersect(colsProcAvaliativo, names(dados))
     if (!length(cols)) return(data.frame(item = character(), media = numeric()))
@@ -1281,7 +1400,7 @@ pr <- pr_get(
   function(campus = "all", curso = "all") {
 
     campus <- normalize_param(campus); curso <- normalize_param(curso)
-    dados  <- filter_data(base_discente_global, base_docente_global, campus, curso)$disc
+    dados  <- .get_filtered(campus, curso)$disc
 
     cols <- intersect(colsProcAvaliativo, names(dados))
     if (!length(cols)) return(data.frame(item = character(), conceito = character(), valor = numeric()))
@@ -1312,7 +1431,7 @@ pr <- pr_get(
     campus <- normalize_param(campus)
     curso  <- normalize_param(curso)
 
-    dados <- filter_data(base_discente_global, base_docente_global, campus, curso)$disc
+    dados <- .get_filtered(campus, curso)$disc
     cols  <- intersect(paste0("mediap", 231:234), names(dados))
 
     box_df_list <- list()
@@ -1364,7 +1483,7 @@ pr <- pr_get(
     .assert_subdim_map_doc()
     campus <- normalize_param(campus); curso <- normalize_param(curso)
 
-    dados <- filter_data(base_discente_global, base_docente_global, campus, curso)$doc
+    dados <- .get_filtered(campus, curso)$doc
     names(dados) <- trimws(as.character(names(dados)))
 
     cols <- intersect(subdim_map_doc[["Processo Avaliativo"]], names(dados))
@@ -1385,7 +1504,7 @@ pr <- pr_get(
     .assert_subdim_map_doc()
     campus <- normalize_param(campus); curso <- normalize_param(curso)
 
-    dados <- filter_data(base_discente_global, base_docente_global, campus, curso)$doc
+    dados <- .get_filtered(campus, curso)$doc
     names(dados) <- trimws(as.character(names(dados)))
 
     cols <- intersect(subdim_map_doc[["Processo Avaliativo"]], names(dados))
@@ -1415,7 +1534,7 @@ pr <- pr_get(
   function(campus = "all", curso = "all") {
 
     campus <- normalize_param(campus); curso <- normalize_param(curso)
-    dados  <- filter_data(base_discente_global, base_docente_global, campus, curso)$disc
+    dados  <- .get_filtered(campus, curso)$disc
 
     cols <- intersect(colsInfra, names(dados))
     if (!length(cols)) return(data.frame(item = character(), media = numeric()))
@@ -1433,7 +1552,7 @@ pr <- pr_get(
   function(campus = "all", curso = "all") {
 
     campus <- normalize_param(campus); curso <- normalize_param(curso)
-    dados  <- filter_data(base_discente_global, base_docente_global, campus, curso)$disc
+    dados  <- .get_filtered(campus, curso)$disc
 
     cols <- intersect(colsInfra, names(dados))
     if (!length(cols)) return(data.frame(item = character(), conceito = character(), valor = numeric()))
@@ -1461,7 +1580,7 @@ pr <- pr_get(
     campus <- normalize_param(campus)
     curso  <- normalize_param(curso)
 
-    dados <- filter_data(base_discente_global, base_docente_global, campus, curso)$disc
+    dados <- .get_filtered(campus, curso)$disc
     cols  <- intersect(paste0("mediap", 311:314), names(dados))
 
     box_df_list <- list()
@@ -1511,7 +1630,7 @@ pr <- pr_get(
   function(campus = "all", curso = "all") {
 
     campus <- normalize_param(campus); curso <- normalize_param(curso)
-    dados  <- filter_data(base_discente_global, base_docente_global, campus, curso)$doc
+    dados  <- .get_filtered(campus, curso)$doc
 
     cols <- intersect(colsInfraDoc, names(dados))
     if (!length(cols)) return(data.frame(item = character(), media = numeric()))
@@ -1529,7 +1648,7 @@ pr <- pr_get(
   function(campus = "all", curso = "all") {
 
     campus <- normalize_param(campus); curso <- normalize_param(curso)
-    dados  <- filter_data(base_discente_global, base_docente_global, campus, curso)$doc
+    dados  <- .get_filtered(campus, curso)$doc
 
     cols <- intersect(colsInfraDoc, names(dados))
     if (!length(cols)) return(data.frame(item = character(), conceito = character(), valor = numeric()))
