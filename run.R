@@ -17,7 +17,7 @@ suppressPackageStartupMessages({
 
 # Porta/host para PaaS
 # Hugging Face Spaces normalmente usa PORT=7860.
-PORT <- as.integer(Sys.getenv("PORT", "7860"))
+PORT <- as.integer(Sys.getenv("PORT", "8000"))
 HOST <- Sys.getenv("HOST", "0.0.0.0")
 
 # -------------------------------------------------------------------

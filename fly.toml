@@ -11,3 +11,7 @@
     grace_period = "10s"
     method = "GET"
     path = "/health"
+    
+[env]
+  PORT = "8000"
+  HOST = "0.0.0.0"
